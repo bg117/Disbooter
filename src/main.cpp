@@ -289,6 +289,7 @@ int wmain(int argc, const wchar_t* argv[])
 	{
 		std::wcout << L"Run as administrator" << std::endl;
 		system("pause");
+		return 1;
 	}
 
 	if (!OpenBootDrive())
