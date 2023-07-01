@@ -60,72 +60,13 @@ std::wstring FormatErrorMessage(DWORD errorCode = GetLastError())
 	return errorMessage;
 }
 
-bool GetGptPartitions(std::vector<PartitionEntry>& partitions)
-{
-	DWORD dwBytesReturned;
-	DRIVE_LAYOUT_INFORMATION_EX* driveLayoutInfo = nullptr;
-	DWORD bufferSize = sizeof(DRIVE_LAYOUT_INFORMATION_EX) + (sizeof(PARTITION_INFORMATION_EX) * 128);
-	// Allocate a larger buffer
-
-	while (true)
-	{
-		driveLayoutInfo = static_cast<DRIVE_LAYOUT_INFORMATION_EX*>(realloc(driveLayoutInfo, bufferSize));
-		if (!driveLayoutInfo)
-		{
-			std::wcout << L"Failed to allocate memory for drive layout information." << std::endl;
-			return false;
-		}
-
-		if (DeviceIoControl(hBootDrive, IOCTL_DISK_GET_DRIVE_LAYOUT_EX, nullptr, 0, driveLayoutInfo, bufferSize,
-		                    &dwBytesReturned, nullptr))
-		{
-			break; // Successfully retrieved drive layout information
-		}
-
-		if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
-		{
-			std::wcout << L"Failed to get drive layout. Error: " << FormatErrorMessage() << std::endl;
-			free(driveLayoutInfo);
-			return false;
-		}
-
-		// Retry with a larger buffer size
-		bufferSize += sizeof(PARTITION_INFORMATION_EX) * 128;
-	}
-
-	const PARTITION_INFORMATION_EX* partitionInfo = driveLayoutInfo->PartitionEntry;
-	for (DWORD i = 0; i < driveLayoutInfo->PartitionCount; ++i)
-	{
-		PartitionEntry entry{};
-		entry.partitionNumber = partitionInfo->PartitionNumber;
-		entry.startingOffset = partitionInfo->StartingOffset.QuadPart;
-		entry.size = partitionInfo->PartitionLength.QuadPart;
-		entry.partitionType = partitionInfo->Gpt.PartitionType;
-		entry.partitionId = partitionInfo->Gpt.PartitionId;
-
-		partitions.push_back(entry);
-
-		++partitionInfo;
-	}
-
-	free(driveLayoutInfo);
-
-	return true;
-}
-
-bool IsESP(const GUID& partitionType)
-{
-	constexpr GUID espGuid = {0xC12A7328, 0xF81F, 0x11D2, {0xBA, 0x4B, 0x00, 0xA0, 0xC9, 0x3E, 0xC9, 0x3B}};
-	return IsEqualGUID(partitionType, espGuid);
-}
-
 bool GetPhysicalDriveFromDriveLetter(const std::wstring& driveLetter, std::wstring& physicalDrive)
 {
 	DWORD bytesReturned;
 	STORAGE_DEVICE_NUMBER storageDeviceNumber;
 
 	const HANDLE hVolume = CreateFileW(driveLetter.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
-	                                   OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, nullptr);
+		OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, nullptr);
 	if (hVolume == INVALID_HANDLE_VALUE)
 	{
 		std::wcout << L"Failed to open volume " << driveLetter << L". Error: " << FormatErrorMessage() << std::endl;
@@ -133,7 +74,7 @@ bool GetPhysicalDriveFromDriveLetter(const std::wstring& driveLetter, std::wstri
 	}
 
 	if (!DeviceIoControl(hVolume, IOCTL_STORAGE_GET_DEVICE_NUMBER, nullptr, 0, &storageDeviceNumber,
-	                     sizeof(storageDeviceNumber), &bytesReturned, nullptr))
+		sizeof(storageDeviceNumber), &bytesReturned, nullptr))
 	{
 		std::wcout << L"Failed to retrieve device number for volume " << driveLetter << L". Error: " <<
 			FormatErrorMessage() << std::endl;
@@ -148,16 +89,21 @@ bool GetPhysicalDriveFromDriveLetter(const std::wstring& driveLetter, std::wstri
 	return true;
 }
 
-std::wstring GUIDToString(const GUID& guid)
+bool GetLBASectorSize(DWORD& sectorSize)
 {
-	wchar_t guidStr[39]; // GUID string representation has a fixed length of 39 characters (including null-terminator)
-	if (StringFromGUID2(guid, guidStr, std::size(guidStr)) == 0)
+	DWORD bytesReturned;
+	DISK_GEOMETRY_EX diskGeometry;
+
+	if (!DeviceIoControl(hBootDrive, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, &diskGeometry,
+		sizeof(diskGeometry), &bytesReturned, nullptr))
 	{
-		std::wcout << L"Failed to convert GUID to string." << std::endl;
-		return L"";
+		std::wcout << L"Failed to retrieve drive geometry. Error: " << FormatErrorMessage() << std::endl;
+		return false;
 	}
 
-	return guidStr;
+	sectorSize = diskGeometry.Geometry.BytesPerSector;
+
+	return true;
 }
 
 bool OpenBootDrive()
@@ -170,43 +116,12 @@ bool OpenBootDrive()
 
 	// Open the boot drive
 	hBootDrive = CreateFileW(bootDrive.c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
-	                         nullptr, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING, nullptr);
+		nullptr, OPEN_EXISTING, FILE_FLAG_NO_BUFFERING | FILE_FLAG_WRITE_THROUGH, nullptr);
 	if (hBootDrive == INVALID_HANDLE_VALUE)
 	{
 		std::wcout << L"Failed to open the boot drive. Error: " << FormatErrorMessage() << std::endl;
 		return false;
 	}
-
-	return true;
-}
-
-bool GetESPVolume(std::wstring& espVolume)
-{
-	std::vector<PartitionEntry> partitions;
-	if (!GetGptPartitions(partitions))
-	{
-		return false;
-	}
-
-	PartitionEntry esp{};
-	bool found = false;
-	for (const auto& partition : partitions)
-	{
-		if (IsESP(partition.partitionType))
-		{
-			esp = partition;
-			found = true;
-			break;
-		}
-	}
-
-	if (!found)
-	{
-		std::wcout << L"Failed to locate EFI System Partition" << std::endl;
-		return false;
-	}
-
-	espVolume = L"\\\\?\\Volume" + GUIDToString(esp.partitionId);
 
 	return true;
 }
@@ -217,7 +132,7 @@ bool GetBootDriveType(PartitionStyle& style)
 	DWORD bytesReturned = 0;
 	PARTITION_INFORMATION_EX partitionInfo;
 	if (!DeviceIoControl(hBootDrive, IOCTL_DISK_GET_PARTITION_INFO_EX, nullptr, 0, &partitionInfo,
-	                     sizeof(partitionInfo), &bytesReturned, nullptr))
+		sizeof(partitionInfo), &bytesReturned, nullptr))
 	{
 		std::wcout << L"Failed to retrieve the partition style. Error: " << FormatErrorMessage() << std::endl;
 		CloseHandle(hBootDrive);
@@ -237,6 +152,18 @@ bool ReadMBR(BYTE buffer[512])
 	if (!(ReadFile(hBootDrive, buffer, 512, &bytesRead, nullptr) && bytesRead == 512))
 	{
 		std::wcout << L"Failed to read MBR from boot drive. Error: " << FormatErrorMessage() << std::endl;
+		return false;
+	}
+
+	return true;
+}
+
+bool ReadGPT(BYTE* buffer, DWORD sectorSize)
+{
+	DWORD bytesRead = 0;
+	if (!(ReadFile(hBootDrive, buffer, sectorSize * 2, &bytesRead, nullptr) && bytesRead == sectorSize * 2))
+	{
+		std::wcout << L"Failed to read LBA 0 + 8 from boot drive. Error: " << FormatErrorMessage() << std::endl;
 		return false;
 	}
 
@@ -266,19 +193,50 @@ BOOL IsElevated()
 bool WriteBootSignature(const unsigned char sig[2])
 {
 	unsigned char buffer[512];
-	ReadMBR(buffer);
+	if (!ReadMBR(buffer))
+	{
+		return false;
+	}
 
 	buffer[510] = sig[0];
 	buffer[511] = sig[1];
 
 	DWORD bytesWritten = 0;
-	PrintBytes(buffer, 512);
 	if (!(WriteFile(hBootDrive, buffer, 512, &bytesWritten, nullptr) && bytesWritten == 512))
 	{
 		std::wcout << L"Failed to write to boot sector. Error: " << FormatErrorMessage() << std::endl;
 		return false;
 	}
 
+	return true;
+}
+
+bool WriteGPTSignature(const unsigned char sig[8])
+{
+	DWORD sectorSize;
+	if (!GetLBASectorSize(sectorSize))
+	{
+		return false;
+	}
+
+	const auto buffer = new unsigned char[sectorSize * 2];
+	if (!ReadGPT(buffer, sectorSize))
+	{
+		delete[] buffer;
+		return false;
+	}
+
+	memcpy(buffer + sectorSize, sig, 8);
+
+	DWORD bytesWritten = 0;
+	if (!(WriteFile(hBootDrive, buffer, sectorSize * 2, &bytesWritten, nullptr) && bytesWritten == sectorSize * 2))
+	{
+		std::wcout << L"Failed to write to GPT header. Error: " << FormatErrorMessage() << std::endl;
+		delete[] buffer;
+		return false;
+	}
+
+	delete[] buffer;
 	return true;
 }
 
@@ -307,25 +265,38 @@ int wmain(int argc, const wchar_t* argv[])
 	{
 		std::wcout << L"Detected GPT" << std::endl;
 
-		std::wstring espVolume;
-		if (!GetESPVolume(espVolume))
+		DWORD sectorSize;
+		if (!GetLBASectorSize(sectorSize))
 		{
 			goto exit_error;
 		}
 
-		std::wcout << L"Found ESP at " << espVolume << std::endl;
+		unsigned char sig[8] = { 'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T' };
+
+		if (argc > 1 && args[0] == L"--rollback-gpt-signature")
+		{
+			std::wcout << L"Rolling back GPT signature" << std::endl;
+		}
+		else
+		{
+			std::wcout << L"Destroying GPT signature" << std::endl;
+			memset(sig, 0, 8);
+		}
+
+		if (!WriteGPTSignature(sig))
+		{
+			goto exit_error;
+		}
 	}
 	else
 	{
 		std::wcout << L"Detected MBR" << std::endl;
 
-		unsigned char sig[2];
-		unsigned char buffer[512];
+		unsigned char sig[2] = { 0x55, 0xAA };
+
 		if (argc > 1 && args[0] == L"--rollback-mbr-signature")
 		{
-			std::wcout << L"Rolling back 0xAA55" << std::endl;
-			sig[0] = 0x55;
-			sig[1] = 0xAA;
+			std::wcout << L"Rolling back MBR signature" << std::endl;
 		}
 		else
 		{
@@ -338,9 +309,6 @@ int wmain(int argc, const wchar_t* argv[])
 		{
 			goto exit_error;
 		}
-
-		ReadMBR(buffer);
-		PrintBytes(buffer, 512);
 	}
 
 	std::wcout << L"Done" << std::endl;
