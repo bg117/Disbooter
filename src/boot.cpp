@@ -45,10 +45,13 @@ bool OpenBootDrive()
 
 bool CloseBootDrive()
 {
-	if (!CloseHandle(hBootDrive))
+	if (hBootDrive != INVALID_HANDLE_VALUE)
 	{
-		std::wcout << L"Failed to close the boot drive. Error: " << FormatErrorMessage() << std::endl;
-		return false;
+		if (!CloseHandle(hBootDrive))
+		{
+			std::wcout << L"Failed to close the boot drive. Error: " << FormatErrorMessage() << std::endl;
+			return false;
+		}
 	}
 
 	return true;
