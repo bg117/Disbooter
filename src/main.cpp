@@ -58,7 +58,7 @@ int Finalize(const int code, const bool key)
 
 	if (key)
 	{
-		std::wcout << L"Press any key to exit.";
+		std::wcout << L"Press Enter to exit.";
 		std::wcin >> std::ws;
 	}
 
